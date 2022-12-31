@@ -1,0 +1,310 @@
+diff --git a/drivers/dma/dmatest.c b/drivers/dma/dmatest.c
+index 2ac0073c091c..99a359f546dd 100644
+--- a/drivers/dma/dmatest.c
++++ b/drivers/dma/dmatest.c
+@@ -21,7 +21,7 @@
+ #include <linux/slab.h>
+ #include <linux/wait.h>
+ 
+-static unsigned int test_buf_size = 16384;
++static unsigned int test_buf_size = 2097152;
+ module_param(test_buf_size, uint, S_IRUGO | S_IWUSR);
+ MODULE_PARM_DESC(test_buf_size, "Size of the memcpy test buffer");
+ 
+@@ -535,6 +535,7 @@ static int dmatest_alloc_test_data(struct dmatest_data *d,
+ 
+ 	for (i = 0; i < d->cnt; i++) {
+ 		d->raw[i] = kmalloc(buf_size + align, GFP_KERNEL);
++		pr_info("aubrey dmatest iova addr: 0x%llx, vaddr: 0x%llx\n", virt_to_phys(d->raw[i]), (u64)d->raw[i]);
+ 		if (!d->raw[i])
+ 			goto err;
+ 
+diff --git a/drivers/dma/idxd/dma.c b/drivers/dma/idxd/dma.c
+index 25e3cca9ce85..64f52c39a1eb 100644
+--- a/drivers/dma/idxd/dma.c
++++ b/drivers/dma/idxd/dma.c
+@@ -75,7 +75,7 @@ void idxd_dma_complete_txd(struct idxd_desc *desc,
+ 
+ static inline void op_control_flag_setup(unsigned long flags, u32 *desc_flags)
+ {
+-	*desc_flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR;
++	*desc_flags = IDXD_OP_FLAG_CRAV | IDXD_OP_FLAG_RCR | IDXD_OP_FLAG_BOF;
+ 	if (flags & DMA_PREP_INTERRUPT)
+ 		*desc_flags |= IDXD_OP_FLAG_RCI;
+ }
+diff --git a/drivers/dma/idxd/init.c b/drivers/dma/idxd/init.c
+index b4073de157bc..43a257da7377 100644
+--- a/drivers/dma/idxd/init.c
++++ b/drivers/dma/idxd/init.c
+@@ -448,6 +448,9 @@ static void idxd_read_caps(struct idxd_device *idxd)
+ 				IDXD_OPCAP_OFFSET + i * sizeof(u64));
+ 		dev_dbg(dev, "opcap[%d]: %#llx\n", i, idxd->hw.opcap.bits[i]);
+ 	}
++
++	/* set the number of outstanding page request allocation */
++	pci_write_config_word(idxd->pdev, 0x24c, 0x200);
+ }
+ 
+ static struct idxd_device *idxd_alloc(struct pci_dev *pdev, struct idxd_driver_data *data)
+diff --git a/drivers/dma/idxd/submit.c b/drivers/dma/idxd/submit.c
+index 64d0b17cfc28..5b89b8374d14 100644
+--- a/drivers/dma/idxd/submit.c
++++ b/drivers/dma/idxd/submit.c
+@@ -175,6 +175,9 @@ int idxd_submit_desc(struct idxd_wq *wq, struct idxd_desc *desc)
+ 	void __iomem *portal;
+ 	int rc;
+ 
++	pr_info("aubrey: wq bof = %d, wq desc flag = 0x%x\n",
++		wq->wqcfg->bof, desc->hw->flags);
++
+ 	if (idxd->state != IDXD_DEV_ENABLED)
+ 		return -EIO;
+ 
+@@ -203,6 +206,16 @@ int idxd_submit_desc(struct idxd_wq *wq, struct idxd_desc *desc)
+ 		llist_add(&desc->llnode, &ie->pending_llist);
+ 	}
+ 
++	pr_info("%s: aubrey-dump idxd desc!\n", __func__);
++	pr_info("desc->pasid=%d\n", desc->hw->pasid);
++	pr_info("desc->priv=%d\n", desc->hw->priv);
++	pr_info("desc->opcode=%d\n", desc->hw->opcode);
++	pr_info("desc->src_addr=0x%llx\n", (u64)desc->hw->src_addr);
++	pr_info("desc->dst_addr=0x%llx\n", (u64)desc->hw->dst_addr);
++	pr_info("desc->completion_addr=0x%llx\n", (u64)desc->hw->completion_addr);
++	pr_info("desc->xfer_size=0x%llx\n", (u64)desc->hw->xfer_size);
++	pr_info("%s: -----dump end!\n", __func__);
++
+ 	if (wq_dedicated(wq)) {
+ 		iosubmit_cmds512(portal, desc->hw, 1);
+ 	} else {
+diff --git a/drivers/iommu/intel/svm.c b/drivers/iommu/intel/svm.c
+index faaae2b2e1be..803edddc741f 100644
+--- a/drivers/iommu/intel/svm.c
++++ b/drivers/iommu/intel/svm.c
+@@ -1144,6 +1144,8 @@ static irqreturn_t prq_event_thread(int irq, void *d)
+ 	int head, tail, handled = 0;
+ 	unsigned int flags = 0;
+ 
++	pr_info("aubrey prq received\n");
++
+ 	/* Clear PPR bit before reading head/tail registers, to
+ 	 * ensure that we get a new interrupt if needed. */
+ 	writel(DMA_PRS_PPR, iommu->reg + DMAR_PRS_REG);
+@@ -1160,6 +1162,11 @@ static irqreturn_t prq_event_thread(int irq, void *d)
+ 
+ 		handled = 1;
+ 		req = &iommu->prq[head / sizeof(*req)];
++
++		pr_info("aubrey prq handling: head:%d, tail:%d\n", head, tail);
++		pr_info("qw_0: %llx, qw_1: %llx\n", req->qw_0, req->qw_1);
++		pr_info("pasid:%llx, lpig:%llx, prg_index:%llx, addr:%llx\n",
++			(u64)req->pasid, (u64)req->lpig, (u64)req->prg_index, (u64)req->addr);
+ 		result = QI_RESP_INVALID;
+ 		address = (u64)req->addr << VTD_PAGE_SHIFT;
+ 		if (!req->pasid_present) {
+@@ -1258,6 +1265,7 @@ static irqreturn_t prq_event_thread(int irq, void *d)
+ 		sdev = NULL;
+ 		svm = NULL;
+ no_pasid:
++		pr_info("aubrey prq_no_pasid\n");
+ 		if (req->lpig || req->priv_data_present) {
+ 			/*
+ 			 * Per VT-d spec. v3.0 ch7.7, system software must
+@@ -1280,7 +1288,8 @@ static irqreturn_t prq_event_thread(int irq, void *d)
+ 			if (req->priv_data_present)
+ 				memcpy(&resp.qw2, req->priv_data,
+ 				       sizeof(req->priv_data));
+-			qi_submit_sync(iommu, &resp, 1, 0);
++			pr_info("aubrey prq_qi_submit\n");
++//			qi_submit_sync(iommu, &resp, 1, 0);
+ 		}
+ 
+ prq_advance:
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index 9cc17768c425..162148847318 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -1169,6 +1169,7 @@ static long vfio_ioctl_set_iommu(struct vfio_container *container,
+ 	return ret;
+ }
+ 
++struct vfio_iommu_driver *vfio_user_iommu_driver;
+ static long vfio_fops_unl_ioctl(struct file *filep,
+ 				unsigned int cmd, unsigned long arg)
+ {
+@@ -1189,6 +1190,12 @@ static long vfio_fops_unl_ioctl(struct file *filep,
+ 		break;
+ 	case VFIO_SET_IOMMU:
+ 		ret = vfio_ioctl_set_iommu(container, arg);
++		if (!vfio_user_iommu_driver)
++			vfio_user_iommu_driver = container->iommu_driver;
++		break;
++	case VFIO_USER_UNMAP:
++	case VFIO_USER_MAP:
++		ret = vfio_user_iommu_driver->ops->ioctl(vfio_user_iommu, cmd, arg);
+ 		break;
+ 	default:
+ 		driver = container->iommu_driver;
+diff --git a/drivers/vfio/vfio_iommu_type1.c b/drivers/vfio/vfio_iommu_type1.c
+index 1f0c8a1e6517..b4bdd4e17f5c 100644
+--- a/drivers/vfio/vfio_iommu_type1.c
++++ b/drivers/vfio/vfio_iommu_type1.c
+@@ -524,7 +524,6 @@ static int vaddr_get_pfn(struct mm_struct *mm, unsigned long vaddr,
+ 
+ retry:
+ 	vma = find_vma_intersection(mm, vaddr, vaddr + 1);
+-
+ 	if (vma && vma->vm_flags & VM_PFNMAP) {
+ 		ret = follow_fault_pfn(vma, mm, vaddr, pfn, prot & IOMMU_WRITE);
+ 		if (ret == -EAGAIN)
+@@ -543,6 +542,8 @@ static int vaddr_get_pfn(struct mm_struct *mm, unsigned long vaddr,
+  * the iommu can only map chunks of consecutive pfns anyway, so get the
+  * first page and all consecutive pages with the same locking.
+  */
++void *vfio_user_mm = NULL;
++int vfio_user_flag = 0;
+ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
+ 				  long npage, unsigned long *pfn_base,
+ 				  unsigned long limit)
+@@ -551,12 +552,18 @@ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
+ 	long ret, pinned = 0, lock_acct = 0;
+ 	bool rsvd;
+ 	dma_addr_t iova = vaddr - dma->vaddr + dma->iova;
++	struct mm_struct *mm;
++
++	if (vfio_user_flag)
++		mm = (struct mm_struct *)vfio_user_mm;
++	else
++		mm = current->mm;
+ 
+ 	/* This code path is only user initiated */
+-	if (!current->mm)
++	if (!mm)
+ 		return -ENODEV;
+ 
+-	ret = vaddr_get_pfn(current->mm, vaddr, dma->prot, pfn_base);
++	ret = vaddr_get_pfn(mm, vaddr, dma->prot, pfn_base);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -568,7 +575,7 @@ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
+ 	 * pages are already counted against the user.
+ 	 */
+ 	if (!rsvd && !vfio_find_vpfn(dma, iova)) {
+-		if (!dma->lock_cap && current->mm->locked_vm + 1 > limit) {
++		if (!dma->lock_cap && mm->locked_vm + 1 > limit) {
+ 			put_pfn(*pfn_base, dma->prot);
+ 			pr_warn("%s: RLIMIT_MEMLOCK (%ld) exceeded\n", __func__,
+ 					limit << PAGE_SHIFT);
+@@ -583,7 +590,7 @@ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
+ 	/* Lock all the consecutive pages from pfn_base */
+ 	for (vaddr += PAGE_SIZE, iova += PAGE_SIZE; pinned < npage;
+ 	     pinned++, vaddr += PAGE_SIZE, iova += PAGE_SIZE) {
+-		ret = vaddr_get_pfn(current->mm, vaddr, dma->prot, &pfn);
++		ret = vaddr_get_pfn(mm, vaddr, dma->prot, &pfn);
+ 		if (ret)
+ 			break;
+ 
+@@ -595,7 +602,7 @@ static long vfio_pin_pages_remote(struct vfio_dma *dma, unsigned long vaddr,
+ 
+ 		if (!rsvd && !vfio_find_vpfn(dma, iova)) {
+ 			if (!dma->lock_cap &&
+-			    current->mm->locked_vm + lock_acct + 1 > limit) {
++			    mm->locked_vm + lock_acct + 1 > limit) {
+ 				put_pfn(pfn, dma->prot);
+ 				pr_warn("%s: RLIMIT_MEMLOCK (%ld) exceeded\n",
+ 					__func__, limit << PAGE_SHIFT);
+@@ -1295,6 +1302,7 @@ static int vfio_dma_do_unmap(struct vfio_iommu *iommu,
+ 		}
+ 	}
+ 
++	pr_info("aubrey %s, iova:%llx, size:%llx\n", __func__, unmap->iova, unmap->size);
+ 	while ((dma = vfio_find_dma(iommu, unmap->iova, unmap->size))) {
+ 		if (!iommu->v2 && unmap->iova > dma->iova)
+ 			break;
+@@ -1302,9 +1310,10 @@ static int vfio_dma_do_unmap(struct vfio_iommu *iommu,
+ 		 * Task with same address space who mapped this iova range is
+ 		 * allowed to unmap the iova range.
+ 		 */
++#if 0
+ 		if (dma->task->mm != current->mm)
+ 			break;
+-
++#endif
+ 		if (!RB_EMPTY_ROOT(&dma->pfn_list)) {
+ 			struct vfio_iommu_type1_dma_unmap nb_unmap;
+ 
+@@ -1388,6 +1397,9 @@ static int vfio_pin_map_dma(struct vfio_iommu *iommu, struct vfio_dma *dma,
+ 	unsigned long pfn, limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
+ 	int ret = 0;
+ 
++	pr_info("aubrey %s: iova - 0x%llx, vaddr - 0x%llx, size - 0x%llx\n",
++		__func__, iova, (u64)vaddr, (u64)size);
++
+ 	while (size) {
+ 		/* Pin a contiguous chunk of memory */
+ 		npage = vfio_pin_pages_remote(dma, vaddr + dma->size,
+@@ -3004,6 +3016,8 @@ static int vfio_iommu_type1_map_dma(struct vfio_iommu *iommu,
+ 	if (map.argsz < minsz || map.flags & ~mask)
+ 		return -EINVAL;
+ 
++	pr_info("aubrey: %s, iova - %llx, vaddr - %llx, size - %llx\n",
++		__func__, map.iova, map.vaddr, (u64)map.size);
+ 	return vfio_dma_do_map(iommu, &map);
+ }
+ 
+@@ -3045,6 +3059,7 @@ static int vfio_iommu_type1_unmap_dma(struct vfio_iommu *iommu,
+ 			return ret;
+ 	}
+ 
++	pr_info("aubrey: %s, iova - %llx, size - %llx\n", __func__, unmap.iova, (u64)unmap.size);
+ 	ret = vfio_dma_do_unmap(iommu, &unmap, &bitmap);
+ 	if (ret)
+ 		return ret;
+@@ -3339,10 +3354,18 @@ static long vfio_iommu_type1_nesting_op(struct vfio_iommu *iommu,
+ 	return ret;
+ }
+ 
++void *vfio_user_iommu;
++
+ static long vfio_iommu_type1_ioctl(void *iommu_data,
+ 				   unsigned int cmd, unsigned long arg)
+ {
+ 	struct vfio_iommu *iommu = iommu_data;
++	int ret;
++
++	if (!vfio_user_iommu)
++		vfio_user_iommu = iommu_data;
++	if (!vfio_user_mm)
++		vfio_user_mm = current->mm;
+ 
+ 	switch (cmd) {
+ 	case VFIO_CHECK_EXTENSION:
+@@ -3357,6 +3380,13 @@ static long vfio_iommu_type1_ioctl(void *iommu_data,
+ 		return vfio_iommu_type1_dirty_pages(iommu, arg);
+ 	case VFIO_IOMMU_NESTING_OP:
+ 		return vfio_iommu_type1_nesting_op(iommu, arg);
++	case VFIO_USER_UNMAP:
++		return vfio_iommu_type1_unmap_dma(vfio_user_iommu, arg);
++	case VFIO_USER_MAP:
++		vfio_user_flag = 1;
++		ret = vfio_iommu_type1_map_dma(vfio_user_iommu, arg);
++		vfio_user_flag = 0;
++		return ret;
+ 	default:
+ 		return -ENOTTY;
+ 	}
+diff --git a/include/uapi/linux/vfio.h b/include/uapi/linux/vfio.h
+index f408c1f4b183..20860b3db35a 100644
+--- a/include/uapi/linux/vfio.h
++++ b/include/uapi/linux/vfio.h
+@@ -123,6 +123,9 @@ struct vfio_info_cap_header {
+  */
+ #define VFIO_SET_IOMMU			_IO(VFIO_TYPE, VFIO_BASE + 2)
+ 
++#define VFIO_USER_UNMAP			_IO(VFIO_TYPE, VFIO_BASE + 32)
++#define VFIO_USER_MAP			_IO(VFIO_TYPE, VFIO_BASE + 33)
++extern void *vfio_user_iommu;
+ /* -------- IOCTLs for GROUP file descriptors (/dev/vfio/$GROUP) -------- */
+ 
+ /**
